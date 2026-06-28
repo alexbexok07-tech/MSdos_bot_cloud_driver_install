@@ -1,0 +1,10 @@
+{
+    "admin": {
+        "url": "https://raw.githubusercontent.com/alexbexok07-tech/MSdos_bot_cloud_driver_install/main/cogs/admin.py",
+        "desc": "Advanced administration tools."
+    },
+    "economy": {
+        "url": "https://raw.githubusercontent.com/alexbexok07-tech/MSdos_bot_cloud_driver_install/main/cogs/economy.py",
+        "desc": "The official $NG currency system."
+    }
+}
