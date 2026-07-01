@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 import chess
 import random
-import string
 import urllib.parse
 
 class Games(commands.Cog):
@@ -10,16 +9,8 @@ class Games(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        # Two-way memory mapping
-        self.active_games = {} # Tracks the game state by match code
-        self.active_users = {} # Tracks which match code a user belongs to
-
-    def generate_match_code(self) -> str:
-        """Generates a unique 5-character alphanumeric uppercase key."""
-        while True:
-            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
-            if code not in self.active_games:
-                return code
+        # Maps a user's ID directly to their active game data
+        self.active_users = {}
 
     def render_board_embed(self, game) -> discord.Embed:
         """Renders the chess board into a high-quality graphic embed."""
@@ -29,6 +20,7 @@ class Games(commands.Cog):
         fen = urllib.parse.quote(board.fen())
         image_url = f"https://www.chess.com/dynboard?fen={fen}&board=green&piece=neo&size=3"
         
+        # Determine player names
         p_w = self.bot.get_user(game["player_w"])
         name_w = p_w.name if p_w else "White"
         
@@ -47,21 +39,18 @@ class Games(commands.Cog):
         
         if board.is_check():
             embed.add_field(name="⚠️ WARNING", value="**KING IS IN CHECK!**", inline=False)
-            embed.color = 0xE74C3C 
+            embed.color = 0xE74C3C # Turn embed red on check
             
         embed.set_image(url=image_url)
-        # Match code restored in the footer
-        embed.set_footer(text=f"Match Instance: {game['code']} | Move: chessmove e2e4 | Surrender: *exitchess")
+        embed.set_footer(text="Type: chessmove e2e4 | *exitchess to surrender")
         return embed
 
     def end_game(self, game):
-        """Cleans up the memory cache from all dictionaries."""
+        """Cleans up the memory cache to allow players to start new games."""
         if game["player_w"] in self.active_users:
             del self.active_users[game["player_w"]]
         if game["player_b"] != "AI" and game["player_b"] in self.active_users:
             del self.active_users[game["player_b"]]
-        if game["code"] in self.active_games:
-            del self.active_games[game["code"]]
 
     def execute_ai_move(self, board: chess.Board, difficulty: str):
         legal_moves = list(board.legal_moves)
@@ -94,9 +83,7 @@ class Games(commands.Cog):
         if mode not in ["ai", "player"]:
             return await ctx.send("❌ **[SYS_ERR]** Invalid mode. Use `ai` or `player`.")
 
-        match_code = self.generate_match_code()
         game = {
-            "code": match_code,
             "board": chess.Board(),
             "player_w": ctx.author.id,
             "mode": mode,
@@ -106,41 +93,38 @@ class Games(commands.Cog):
         if mode == "ai":
             game["player_b"] = "AI"
             game["difficulty"] = difficulty.lower()
-            self.active_games[match_code] = game
-            self.active_users[ctx.author.id] = match_code
+            self.active_users[ctx.author.id] = game
             
             await ctx.send(f"🤖 **[KERNEL]** AI Engine initialized.", embed=self.render_board_embed(game))
         
         elif mode == "player":
             game["player_b"] = None
-            self.active_games[match_code] = game
-            self.active_users[ctx.author.id] = match_code
+            self.active_users[ctx.author.id] = game
             
-            await ctx.send(f"🎲 **[MULTI_LOBBY]** Match generated! Opponents must type: `*accept_chess {match_code}` to join.")
+            await ctx.send(f"🎲 **[MULTI_LOBBY]** {ctx.author.mention} opened a chess lobby!\nTo join, an opponent must type: `*accept_chess {ctx.author.mention}`")
 
     @commands.command(name="accept_chess")
-    async def accept_chess(self, ctx, code: str):
-        code = code.upper()
+    async def accept_chess(self, ctx, host: discord.Member):
         if ctx.author.id in self.active_users:
             return await ctx.send("❌ **[SYS_ERR]** You are already in a match.")
             
-        if code not in self.active_games:
-            return await ctx.send("❌ **[SYS_ERR]** That match instance code does not exist.")
+        if host.id not in self.active_users:
+            return await ctx.send("❌ **[SYS_ERR]** That user is not hosting a match.")
             
-        game = self.active_games[code]
+        game = self.active_users[host.id]
         
         if game["mode"] != "player":
-            return await ctx.send("❌ **[SYS_ERR]** That terminal is locked to AI mode.")
+            return await ctx.send("❌ **[SYS_ERR]** That user is playing against the AI.")
         if game["player_b"] is not None:
-            return await ctx.send("❌ **[SYS_ERR]** That match lobby is already full. Connection refused.")
-        if game["player_w"] == ctx.author.id:
-            return await ctx.send("❌ **[SYS_ERR]** Loopback error: You cannot play against yourself.")
+            return await ctx.send("❌ **[SYS_ERR]** That match is already full.")
+        if host.id == ctx.author.id:
+            return await ctx.send("❌ **[SYS_ERR]** You cannot play against yourself.")
 
         # Lock player 2 into the session
         game["player_b"] = ctx.author.id
-        self.active_users[ctx.author.id] = code
+        self.active_users[ctx.author.id] = game
         
-        await ctx.send(f"⚔️ **[LINK_ESTABLISHED]** {ctx.author.mention} linked into session **{code}** as Black!", embed=self.render_board_embed(game))
+        await ctx.send(f"⚔️ **[LINK_ESTABLISHED]** {ctx.author.mention} joined as Black!", embed=self.render_board_embed(game))
 
     # --- THE EXIT SYSTEM ---
 
@@ -149,38 +133,36 @@ class Games(commands.Cog):
         if ctx.author.id not in self.active_users:
             return await ctx.send("❌ **[SYS_ERR]** You are not in an active chess session.")
             
-        code = self.active_users[ctx.author.id]
-        game = self.active_games[code]
+        game = self.active_users[ctx.author.id]
         
         if game["mode"] == "ai":
             self.end_game(game)
-            return await ctx.send(f"🏳️ **[SURRENDER]** You disbanded match instance **{code}** against the AI.")
+            return await ctx.send("🏳️ **[SURRENDER]** You disbanded the match against the AI.")
             
+        # Multiplayer request handling
         opponent_id = game["player_b"] if game["player_w"] == ctx.author.id else game["player_w"]
         
-        if opponent_id is None: # Lobby open, nobody joined
+        if opponent_id is None: # Lobby was open but nobody joined yet
             self.end_game(game)
-            return await ctx.send(f"🛑 **[LOBBY_CLOSED]** Match instance **{code}** has been cancelled.")
+            return await ctx.send("🛑 **[LOBBY_CLOSED]** Open matchmaking lobby cancelled.")
 
         game["exit_requested_by"] = ctx.author.id
-        await ctx.send(f"⚠️ <@{opponent_id}>, your opponent wishes to disband the match. Type `*allow` to end it, or `*stop` to deny the request.")
+        await ctx.send(f"⚠️ <@{opponent_id}>, your opponent wishes to disband the match. Type `*allow` to end it, or `*stop` to deny the request and continue playing.")
 
     @commands.command(name="allow")
     async def allow(self, ctx):
         if ctx.author.id not in self.active_users: return
-        code = self.active_users[ctx.author.id]
-        game = self.active_games[code]
+        game = self.active_users[ctx.author.id]
         
         req_by = game.get("exit_requested_by")
         if req_by and req_by != ctx.author.id:
             self.end_game(game)
-            await ctx.send(f"🤝 **[MATCH_DISBANDED]** Instance **{code}** terminated by mutual agreement.")
+            await ctx.send("🤝 **[MATCH_DISBANDED]** Both players agreed to terminate the session.")
 
     @commands.command(name="stop")
     async def stop(self, ctx):
         if ctx.author.id not in self.active_users: return
-        code = self.active_users[ctx.author.id]
-        game = self.active_games[code]
+        game = self.active_users[ctx.author.id]
         
         req_by = game.get("exit_requested_by")
         if req_by and req_by != ctx.author.id:
@@ -191,6 +173,7 @@ class Games(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
+        # Prevent bot loops and check if it's our exact custom command structure
         if message.author.bot: return
         content = message.content.lower().strip()
         
@@ -201,17 +184,18 @@ class Games(commands.Cog):
         if user_id not in self.active_users:
             return await message.channel.send("❌ **[SYS_ERR]** You are not in an active chess match.")
             
-        code = self.active_users[user_id]
-        game = self.active_games[code]
+        game = self.active_users[user_id]
         board = game["board"]
         
         if game["player_b"] is None:
             return await message.channel.send("⏳ **[WAITING]** No opponent has joined your lobby yet.")
 
+        # Authority check
         current_turn_player = game["player_w"] if board.turn == chess.WHITE else game["player_b"]
         if user_id != current_turn_player:
             return await message.channel.send("🛑 **[ACCESS_DENIED]** It is currently your opponent's turn.")
 
+        # Extract the move (e.g. "e2e4" from "chessmove e2e4")
         move_str = content.split(" ")[1]
         
         try:
@@ -222,14 +206,18 @@ class Games(commands.Cog):
         if move not in board.legal_moves:
             return await message.channel.send("❌ **[ILLEGAL_MOVE]** That piece cannot make that movement.")
 
+        # Execute player move
         board.push(move)
         
+        # Check game state
         if await self.check_game_over(message.channel, game): return
 
+        # AI Response
         if game["mode"] == "ai":
             self.execute_ai_move(board, game["difficulty"])
             if await self.check_game_over(message.channel, game): return
 
+        # Re-render the board for the next turn
         await message.channel.send(embed=self.render_board_embed(game))
 
     async def check_game_over(self, channel, game) -> bool:
@@ -240,9 +228,11 @@ class Games(commands.Cog):
             elif board.is_stalemate(): result += "🤝 **Stalemate.**"
             else: result += "🏳️ **Draw declared.**"
             
+            # Send final board and clean up memory
             await channel.send(f"🏁 **[SYSTEM_OVER]** {result}", embed=self.render_board_embed(game))
             self.end_game(game)
             return True
         return False
 
-async def setup(
+async def setup(bot):
+    await bot.add_cog(Games(bot))
